@@ -27,6 +27,7 @@ def search_prs_created(
     deletions = 0
     created_dates: List[date] = []
     merged_dates: List[date] = []
+    pr_details: List[Dict[str, Any]] = []
 
     query = (
         f"org:{org} author:{username} is:pr "
@@ -50,6 +51,16 @@ def search_prs_created(
                     merged_dates.append(pr.merged_at.date())
             additions += pr.additions or 0
             deletions += pr.deletions or 0
+            pr_details.append(
+                {
+                    "username": username,
+                    "title": pr.title,
+                    "url": pr.html_url,
+                    "created_at": pr.created_at,
+                    "merged_at": pr.merged_at,
+                    "state": pr.state,
+                }
+            )
         except GithubException:
             # If a PR fetch fails mid-loop, keep moving with collected data.
             continue
@@ -61,6 +72,7 @@ def search_prs_created(
         "deletions": deletions,
         "created_dates": created_dates,
         "merged_dates": merged_dates,
+        "pr_details": pr_details,
     }
 
 
@@ -77,13 +89,44 @@ def search_reviews(
         f"updated:{start_date.isoformat()}..{end_date.isoformat()}"
     )
     review_dates: List[date] = []
+    review_details: List[Dict[str, Any]] = []
+    count = 0
+
+    max_items = 200  # safety cap to avoid excessive API calls
     try:
-        search_results = gh.search_issues(query=query, sort="updated", order="desc")
-        count = search_results.totalCount
+        for idx, issue in enumerate(
+            gh.search_issues(query=query, sort="updated", order="desc")
+        ):
+            if idx >= max_items:
+                break
+            try:
+                pr = issue.as_pull_request()
+                for review in pr.get_reviews():
+                    if not review.user:
+                        continue
+                    if review.user.login.lower() != username.lower():
+                        continue
+                    if not review.submitted_at:
+                        continue
+                    submitted_date = review.submitted_at.date()
+                    if start_date <= submitted_date <= end_date:
+                        count += 1
+                        review_dates.append(submitted_date)
+                        review_details.append(
+                            {
+                                "username": username,
+                                "pr_title": pr.title,
+                                "pr_url": pr.html_url,
+                                "submitted_at": review.submitted_at,
+                                "state": review.state,
+                            }
+                        )
+            except GithubException:
+                continue
     except GithubException:
         count = 0
 
-    # Fallback: iterate PRs updated in range and count reviews explicitly.
+    # Fallback: iterate PRs updated in range and count reviews explicitly if none found.
     if count == 0:
         fallback_query = (
             f"org:{org} is:pr updated:{start_date.isoformat()}..{end_date.isoformat()}"
@@ -93,7 +136,7 @@ def search_reviews(
             for issue in gh.search_issues(
                 query=fallback_query, sort="updated", order="desc"
             ):
-                if counted_prs >= 300:
+                if counted_prs >= max_items:
                     break  # avoid excessive API calls
                 counted_prs += 1
                 try:
@@ -109,12 +152,21 @@ def search_reviews(
                         if start_date <= submitted_date <= end_date:
                             count += 1
                             review_dates.append(submitted_date)
+                            review_details.append(
+                                {
+                                    "username": username,
+                                    "pr_title": pr.title,
+                                    "pr_url": pr.html_url,
+                                    "submitted_at": review.submitted_at,
+                                    "state": review.state,
+                                }
+                            )
                 except GithubException:
                     continue
         except GithubException:
             pass
 
-    return {"count": count, "review_dates": review_dates}
+    return {"count": count, "review_dates": review_dates, "review_details": review_details}
 
 
 def build_metrics(
@@ -124,6 +176,8 @@ def build_metrics(
     rows = []
     pr_events: List[Dict[str, Any]] = []
     review_events: List[Dict[str, Any]] = []
+    pr_list: List[Dict[str, Any]] = []
+    review_list: List[Dict[str, Any]] = []
 
     for user in users:
         with st.spinner(f"Fetching data for {user}"):
@@ -152,14 +206,20 @@ def build_metrics(
             pr_events.append({"username": user, "date": d, "event": "merged"})
         for d in reviews_data["review_dates"]:
             review_events.append({"username": user, "date": d})
+        pr_list.extend(created_stats["pr_details"])
+        review_list.extend(reviews_data["review_details"])
 
     metrics_df = pd.DataFrame(rows)
     pr_events_df = pd.DataFrame(pr_events)
     review_events_df = pd.DataFrame(review_events)
+    pr_list_df = pd.DataFrame(pr_list)
+    review_list_df = pd.DataFrame(review_list)
     return {
         "metrics": metrics_df,
         "pr_events": pr_events_df,
         "review_events": review_events_df,
+        "pr_list": pr_list_df,
+        "review_list": review_list_df,
     }
 
 
@@ -235,6 +295,8 @@ def main() -> None:
         df = data["metrics"]
         pr_events_df = data["pr_events"]
         review_events_df = data["review_events"]
+        pr_list_df = data["pr_list"]
+        review_list_df = data["review_list"]
 
         if df.empty:
             st.info(
@@ -316,6 +378,26 @@ def main() -> None:
                 "All metrics are zero. Double-check PAT scopes (`repo`, `read:org`), "
                 "org login, usernames, and date range. Private repos require `repo`."
             )
+
+        # Raw lists for drill-down
+        if not pr_list_df.empty:
+            pr_list_df = pr_list_df.copy()
+            pr_list_df["created_at"] = pd.to_datetime(pr_list_df["created_at"])
+            pr_list_df["merged_at"] = pd.to_datetime(pr_list_df["merged_at"])
+            st.subheader("PRs Created (raw)")
+            st.caption("Includes title, URL, created, merged; limited to search window.")
+            st.dataframe(pr_list_df, width="stretch")
+
+        if not review_list_df.empty:
+            review_list_df = review_list_df.copy()
+            review_list_df["submitted_at"] = pd.to_datetime(
+                review_list_df["submitted_at"]
+            )
+            st.subheader("Reviews (raw)")
+            st.caption(
+                "Individual reviews with timestamps; capped to 200 PRs per user to keep fetch time reasonable."
+            )
+            st.dataframe(review_list_df, width="stretch")
 
         st.subheader("Debug (for troubleshooting)")
         with st.expander("Show raw metrics dataframe"):
