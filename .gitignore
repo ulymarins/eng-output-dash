@@ -1,0 +1,26 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.streamlit/secrets.toml
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Test and build artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+dist/
+build/
+*.egg-info/
