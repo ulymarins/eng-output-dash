@@ -174,6 +174,10 @@ def main() -> None:
     st.write(
         "Analyze pull request and review activity for engineers in a GitHub organization."
     )
+    st.warning(
+        "Note: Fetch time scales with the number of users and the date range. "
+        "Larger queries will take longer."
+    )
 
     st.sidebar.header("Inputs")
     token = st.sidebar.text_input(
